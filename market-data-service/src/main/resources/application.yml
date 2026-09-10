@@ -1,0 +1,16 @@
+server:
+  port: 8086
+
+spring:
+  application:
+    name: market-data-service
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: market-data-service
+      auto-offset-reset: latest    # market data is a live feed — a fresh consumer wants
+                                    # the current tick, not to replay all of history
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "com.quidax.liquidityengine.common.event"

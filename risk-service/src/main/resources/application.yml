@@ -1,0 +1,13 @@
+server:
+  port: 8085
+
+spring:
+  application:
+    name: risk-service
+
+risk:
+  max-order-notional-ngn: 100000000       # single-order cap
+  max-price-deviation-from-mid-pct: 10    # reject orders priced >10% away from last mid-price
+  volatility-kill-switch:
+    window-seconds: 60
+    max-price-move-pct: 15                # halt a market if price moves >15% inside the window

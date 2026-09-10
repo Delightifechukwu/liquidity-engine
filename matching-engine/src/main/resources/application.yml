@@ -1,0 +1,29 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: matching-engine
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: matching-engine
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "com.quidax.liquidityengine.common.event"
+        isolation.level: read_committed
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      properties:
+        enable.idempotence: true
+    listener:
+      ack-mode: MANUAL_IMMEDIATE
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus

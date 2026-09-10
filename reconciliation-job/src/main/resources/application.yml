@@ -1,0 +1,17 @@
+server:
+  port: 8087
+
+spring:
+  application:
+    name: reconciliation-job
+  datasource:
+    url: jdbc:postgresql://localhost:5432/liquidity_engine
+    username: liquidity
+    password: liquidity
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+
+reconciliation:
+  cron: "0 0 1 * * *"   # 1am daily
