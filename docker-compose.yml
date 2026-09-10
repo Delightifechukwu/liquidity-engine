@@ -38,6 +38,7 @@ services:
       - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d
 
   redis:
     image: redis:7-alpine
@@ -54,7 +55,7 @@ services:
     ports:
       - "8081:8081"
     environment:
-      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/liquidity_engine
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/order_service
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
 
   matching-engine:

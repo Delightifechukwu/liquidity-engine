@@ -4,6 +4,12 @@
 FROM maven:3.9-eclipse-temurin-21 AS build
 WORKDIR /workspace
 COPY pom.xml .
+COPY order-service/pom.xml ./order-service/pom.xml
+COPY matching-engine/pom.xml ./matching-engine/pom.xml
+COPY execution-settlement/pom.xml ./execution-settlement/pom.xml
+COPY market-data-service/pom.xml ./market-data-service/pom.xml
+COPY risk-service/pom.xml ./risk-service/pom.xml
+COPY reconciliation-job/pom.xml ./reconciliation-job/pom.xml
 COPY common ./common
 COPY liquidity-provider-adapter ./liquidity-provider-adapter
 RUN mvn -pl liquidity-provider-adapter -am -q -DskipTests package
