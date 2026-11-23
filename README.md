@@ -1,6 +1,6 @@
 # Liquidity Engine
 
-A Java 21 and Spring Boot simulation of a BTC–NGN exchange. It shows how I apply experience with payments settlement, multi-bank ledgers, reconciliation, and ISO 8583 switching to a trading problem: keeping orders and balances correct through concurrent requests, retries, and broker outages.
+A BTC–NGN exchange engine built with Java 21, Spring Boot, PostgreSQL, and Kafka. It supports price-time matching, wallet reservations, double-entry settlement, reconciliation, and WebSocket trade updates.
 
 ## Run the demo
 
@@ -30,15 +30,10 @@ The market lock gives price-time priority, prevents cancellation from racing a f
 
 The authenticated `GET /api/v1/routes/buy-preview?maxPrice=50000000&quantity=0.1` endpoint compares an eligible internal price level with a mock provider offer. It checks price, size, expiry, and degraded status. It falls back to internal liquidity when the provider is unavailable. This is an indicative, single-level preview. Set `MOCK_LP_FAILURE_RATE` before starting Compose to inject mock provider errors. Orders execute on the internal book. Provider execution, fees, deposits and withdrawals, and stop triggers are outside the demo’s scope. Stop orders are rejected explicitly.
 
-## Verify and measure
+## Run the Java tests
 
 ```sh
 mvn --batch-mode clean verify
-python3 scripts/benchmark.py --orders 200 --workers 16
 ```
 
-The benchmark seeds separate maker and taker wallets, places a resting book, and measures concurrent taker submissions through HTTP and the database. It reports p50, p95, p99, and orders per second, then verifies fill count, FIFO, and ledger reconciliation. Use a quiet demo stack for repeatable runs. GitHub Actions runs the Java tests and Compose smoke test from a clean checkout.
-
-One local run on an ARM64 Docker Desktop VM with 12 logical CPUs and 7.75 GiB RAM processed 200 taker orders at 16 workers. Throughput was **260.4 orders/s**, with **55.0 ms p50**, **96.7 ms p95**, and **120.0 ms p99**. This measures HTTP submission through committed settlement. Kafka delivery runs asynchronously and is excluded from those timings.
-
-See [recovery notes](docs/recovery.md) for operational queries and [the Quidax role mapping](docs/jd-mapping.md) for the scope of the showcase.
+See [recovery notes](docs/recovery.md) for outbox inspection and reconciliation.
