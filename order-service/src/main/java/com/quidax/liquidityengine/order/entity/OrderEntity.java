@@ -55,6 +55,9 @@ public class OrderEntity {
     @Column(name = "updated_at", nullable = false)
     private Instant updatedAt;
 
+    @Column(nullable = false, precision = 38, scale = 8)
+    private BigDecimal reserved = BigDecimal.ZERO;
+
     @Version
     private Long version;
 
@@ -80,7 +83,8 @@ public class OrderEntity {
         this.updatedAt = updatedAt;
     }
 
-    // --- getters / setters ---
+    public BigDecimal getReserved() { return reserved; }
+    public void setReserved(BigDecimal reserved) { this.reserved = reserved; }
 
     public UUID getId() { return id; }
     public String getIdempotencyKey() { return idempotencyKey; }

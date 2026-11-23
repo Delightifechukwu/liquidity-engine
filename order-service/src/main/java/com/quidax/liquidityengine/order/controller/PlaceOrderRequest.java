@@ -12,12 +12,12 @@ import java.util.UUID;
  * that must be safely retryable), not the body — see OrderController.
  */
 public record PlaceOrderRequest(
-        @NotNull UUID userId,
+        UUID userId,
         @NotBlank String market,
         @NotNull OrderSide side,
         @NotNull OrderType type,
-        @DecimalMin(value = "0.0", inclusive = false) BigDecimal price,
+        @Digits(integer = 12, fraction = 0) @DecimalMin(value = "0.0", inclusive = false) BigDecimal price,
         @DecimalMin(value = "0.0", inclusive = false) BigDecimal stopPrice,
-        @NotNull @DecimalMin(value = "0.0", inclusive = false) BigDecimal quantity
+        @NotNull @Digits(integer = 8, fraction = 8) @DecimalMin(value = "0.0", inclusive = false) BigDecimal quantity
 ) {
 }

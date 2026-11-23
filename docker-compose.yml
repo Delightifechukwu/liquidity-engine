@@ -1,32 +1,22 @@
-version: "3.8"
-
-# Local dev/demo stack. Not a production Kubernetes manifest — the JD's cloud/K8s requirement
-# is demonstrated via the AWS/EKS work on the resume, not this repo; this compose file's job
-# is "clone, docker compose up, place an order" in under two minutes.
-
 services:
-
-  zookeeper:
-    image: confluentinc/cp-zookeeper:7.6.0
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-    ports:
-      - "2181:2181"
 
   kafka:
     image: confluentinc/cp-kafka:7.6.0
-    depends_on:
-      - zookeeper
     environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-    ports:
-      - "9092:9092"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      - kafka-kraft-data:/var/lib/kafka/data
 
   postgres:
     image: postgres:16-alpine
@@ -34,31 +24,47 @@ services:
       POSTGRES_DB: liquidity_engine
       POSTGRES_USER: liquidity
       POSTGRES_PASSWORD: liquidity
-    ports:
-      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U liquidity -d order_service -h 127.0.0.1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./docker/postgres-init:/docker-entrypoint-initdb.d
 
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
+  # Issues real, validly-signed JWTs for local/demo use so order-service's OAuth2 resource
+  # server wiring can be exercised end-to-end without standing up a full Keycloak instance.
+  # Not used or shipped in production.
+  oauth:
+    image: ghcr.io/navikt/mock-oauth2-server@sha256:b538810afd589d42fbfb856c588c2065eaeed1dc528d6c532972048e67fc2aff
+    environment:
+      SERVER_PORT: 8080
+      JSON_CONFIG_PATH: /config/demo.json
+    volumes:
+      - ./docker/oauth-demo.json:/config/demo.json:ro
 
   order-service:
     build:
       context: .
       dockerfile: order-service/Dockerfile
     depends_on:
-      - kafka
-      - postgres
+      kafka:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      oauth:
+        condition: service_started
     ports:
-      - "8081:8081"
+      - "127.0.0.1:${ORDER_HOST_PORT:-8081}:8081"
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/order_service
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      LP_BASE_URL: http://liquidity-provider-adapter:8084
+      OAUTH_ISSUER_URI: http://oauth:8080/liquidity-engine
 
   matching-engine:
+    profiles: [legacy]
     build:
       context: .
       dockerfile: matching-engine/Dockerfile
@@ -70,6 +76,7 @@ services:
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
 
   execution-settlement:
+    profiles: [legacy]
     build:
       context: .
       dockerfile: execution-settlement/Dockerfile
@@ -86,10 +93,13 @@ services:
     build:
       context: .
       dockerfile: liquidity-provider-adapter/Dockerfile
+    environment:
+      MOCK_LP_FAILURE_RATE: ${MOCK_LP_FAILURE_RATE:-0}
     ports:
-      - "8084:8084"
+      - "127.0.0.1:${PROVIDER_HOST_PORT:-8084}:8084"
 
   risk-service:
+    profiles: [legacy]
     build:
       context: .
       dockerfile: risk-service/Dockerfile
@@ -103,11 +113,12 @@ services:
     depends_on:
       - kafka
     ports:
-      - "8086:8086"
+      - "127.0.0.1:${MARKET_DATA_HOST_PORT:-8086}:8086"
     environment:
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
 
   reconciliation-job:
+    profiles: [legacy]
     build:
       context: .
       dockerfile: reconciliation-job/Dockerfile
@@ -119,4 +130,5 @@ services:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/liquidity_engine
 
 volumes:
+  kafka-kraft-data:
   postgres-data:

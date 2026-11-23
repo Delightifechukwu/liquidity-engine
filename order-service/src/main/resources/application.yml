@@ -5,7 +5,7 @@ spring:
   application:
     name: order-service
   datasource:
-    url: jdbc:postgresql://localhost:5432/liquidity_engine
+    url: jdbc:postgresql://localhost:5432/order_service
     username: liquidity
     password: liquidity
   jpa:
@@ -23,12 +23,15 @@ spring:
       acks: all
       properties:
         enable.idempotence: true
-        retries: 5
+        max.block.ms: 3000
+        request.timeout.ms: 3000
+        delivery.timeout.ms: 5000
   security:
     oauth2:
       resourceserver:
         jwt:
-          issuer-uri: ${OAUTH_ISSUER_URI:http://localhost:8080/realms/liquidity-engine}
+          audiences: liquidity-engine
+          issuer-uri: ${OAUTH_ISSUER_URI:http://localhost:8080/liquidity-engine}
 
 management:
   endpoints:
@@ -39,5 +42,6 @@ management:
     sampling:
       probability: 1.0
 
-risk-service:
-  base-url: ${RISK_SERVICE_URL:http://localhost:8085}
+trading:
+  outbox-delay-ms: 250
+  provider-url: ${LP_BASE_URL:http://localhost:8084}

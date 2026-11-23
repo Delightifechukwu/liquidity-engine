@@ -9,6 +9,7 @@ public final class Topics {
     private Topics() {}
 
     public static final String ORDERS_CREATED = "orders.created";
+    public static final String TRADES_SETTLED = "trades.settled";
     public static final String ORDERS_CANCELLED = "orders.cancelled";
     public static final String TRADES_EXECUTED = "trades.executed";
     public static final String SETTLEMENTS_COMPLETED = "settlements.completed";

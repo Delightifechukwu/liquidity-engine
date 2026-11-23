@@ -1,5 +1,8 @@
 package com.quidax.liquidityengine.common.model;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonValue;
+
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.Objects;
@@ -8,6 +11,11 @@ import java.util.Objects;
  * Fixed-scale monetary value. Wrapping BigDecimal here (rather than passing it around raw)
  * is deliberate: every arithmetic op enforces the same scale + rounding mode, so precision
  * decisions are made once, in one place, instead of at every call site across the codebase.
+ *
+ * (De)serializes as a plain decimal (via @JsonCreator/@JsonValue) rather than an object,
+ * since Jackson has no default constructor or bean accessor to work with otherwise —
+ * required for Money-bearing events (e.g. OrderCreatedEvent's Order) to survive a Kafka
+ * round-trip.
  */
 public final class Money implements Comparable<Money> {
 
@@ -20,6 +28,7 @@ public final class Money implements Comparable<Money> {
         this.amount = amount;
     }
 
+    @JsonCreator
     public static Money of(BigDecimal amount) {
         Objects.requireNonNull(amount, "amount");
         return new Money(amount.setScale(SCALE, RoundingMode.HALF_UP));
@@ -29,6 +38,7 @@ public final class Money implements Comparable<Money> {
         return of(new BigDecimal(amount));
     }
 
+    @JsonValue
     public BigDecimal value() {
         return amount;
     }

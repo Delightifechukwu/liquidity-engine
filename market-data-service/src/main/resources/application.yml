@@ -8,8 +8,7 @@ spring:
     bootstrap-servers: localhost:9092
     consumer:
       group-id: market-data-service
-      auto-offset-reset: latest    # market data is a live feed — a fresh consumer wants
-                                    # the current tick, not to replay all of history
+      auto-offset-reset: earliest
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
       properties:

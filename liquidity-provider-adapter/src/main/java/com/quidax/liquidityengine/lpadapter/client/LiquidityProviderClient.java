@@ -10,6 +10,7 @@ import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
 import java.util.UUID;
+import java.time.Instant;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -32,7 +33,7 @@ public class LiquidityProviderClient {
         this.mockLiquidityProvider = mockLiquidityProvider;
     }
 
-    public record Quote(UUID quoteId, String market, BigDecimal price, BigDecimal availableQuantity, boolean degraded) {}
+    public record Quote(UUID quoteId, String market, BigDecimal price, BigDecimal availableQuantity, boolean degraded, Instant expiresAt) {}
 
     @CircuitBreaker(name = "externalLiquidityProvider", fallbackMethod = "fallbackQuote")
     @Retry(name = "externalLiquidityProvider")
@@ -42,7 +43,7 @@ public class LiquidityProviderClient {
             try {
                 var response = mockLiquidityProvider.fetchQuote(market);
                 return new Quote(response.quoteId(), response.market(), response.price(),
-                        response.availableQuantity(), false);
+                        response.availableQuantity(), false, Instant.now().plusSeconds(2));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new RuntimeException(e);
@@ -60,6 +61,6 @@ public class LiquidityProviderClient {
         log.warn("Liquidity provider unavailable for market {} — returning degraded quote. Cause: {}",
                 market, t.toString());
         return CompletableFuture.completedFuture(
-                new Quote(UUID.randomUUID(), market, BigDecimal.ZERO, BigDecimal.ZERO, true));
+                new Quote(UUID.randomUUID(), market, BigDecimal.ZERO, BigDecimal.ZERO, true, Instant.EPOCH));
     }
 }

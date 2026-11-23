@@ -8,6 +8,9 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.UUID;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.web.server.ResponseStatusException;
 
 @RestController
 @RequestMapping("/api/v1/orders")
@@ -27,22 +30,29 @@ public class OrderController {
     @PostMapping
     public ResponseEntity<OrderResponse> placeOrder(
             @RequestHeader("Idempotency-Key") String idempotencyKey,
-            @Valid @RequestBody PlaceOrderRequest request) {
+            @Valid @RequestBody PlaceOrderRequest request, @AuthenticationPrincipal Jwt jwt) {
 
-        OrderService.PlaceOrderResult result = orderService.placeOrder(idempotencyKey, request);
+        OrderService.PlaceOrderResult result = orderService.placeOrder(userId(jwt), idempotencyKey, request);
         HttpStatus status = result.wasAlreadyPresent() ? HttpStatus.OK : HttpStatus.CREATED;
         return ResponseEntity.status(status).body(OrderResponse.from(result.order()));
     }
 
     @GetMapping("/{orderId}")
-    public ResponseEntity<OrderResponse> getOrder(@PathVariable UUID orderId) {
-        OrderEntity order = orderService.getOrder(orderId);
+    public ResponseEntity<OrderResponse> getOrder(@PathVariable UUID orderId, @AuthenticationPrincipal Jwt jwt) {
+        OrderEntity order = orderService.getOrder(userId(jwt), orderId);
         return ResponseEntity.ok(OrderResponse.from(order));
     }
 
     @DeleteMapping("/{orderId}")
-    public ResponseEntity<OrderResponse> cancelOrder(@PathVariable UUID orderId) {
-        OrderEntity order = orderService.cancelOrder(orderId);
+    public ResponseEntity<OrderResponse> cancelOrder(@PathVariable UUID orderId, @AuthenticationPrincipal Jwt jwt) {
+        OrderEntity order = orderService.cancelOrder(userId(jwt), orderId);
         return ResponseEntity.ok(OrderResponse.from(order));
+    }
+    private UUID userId(Jwt jwt) {
+        try {
+            return UUID.fromString(jwt.getSubject());
+        } catch (IllegalArgumentException | NullPointerException ex) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "A UUID subject is required");
+        }
     }
 }

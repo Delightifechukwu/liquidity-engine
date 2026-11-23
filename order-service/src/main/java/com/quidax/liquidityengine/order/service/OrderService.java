@@ -1,119 +1,193 @@
 package com.quidax.liquidityengine.order.service;
 
-import com.quidax.liquidityengine.common.event.OrderCancelledEvent;
-import com.quidax.liquidityengine.common.event.OrderCreatedEvent;
-import com.quidax.liquidityengine.common.model.*;
-import com.quidax.liquidityengine.common.util.Topics;
+import com.quidax.liquidityengine.common.model.OrderSide;
+import com.quidax.liquidityengine.common.model.OrderStatus;
+import com.quidax.liquidityengine.common.model.OrderType;
 import com.quidax.liquidityengine.order.controller.PlaceOrderRequest;
 import com.quidax.liquidityengine.order.entity.OrderEntity;
 import com.quidax.liquidityengine.order.repository.OrderRepository;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.UUID;
 
-/**
- * Owns the order lifecycle up to the point of handoff to matching-engine: validation,
- * idempotent creation, and publishing OrderCreatedEvent. Everything downstream of "order
- * accepted into the book" belongs to matching-engine and execution-settlement.
- */
 @Service
 public class OrderService {
+    private static final String MARKET = "BTC-NGN";
+    private static final String BASE = "BTC";
+    private static final String QUOTE = "NGN";
 
-    private static final Logger log = LoggerFactory.getLogger(OrderService.class);
+    private final OrderRepository orders;
+    private final JdbcTemplate jdbc;
 
-    private final OrderRepository orderRepository;
-    private final KafkaTemplate<String, Object> kafkaTemplate;
-
-    public OrderService(OrderRepository orderRepository, KafkaTemplate<String, Object> kafkaTemplate) {
-        this.orderRepository = orderRepository;
-        this.kafkaTemplate = kafkaTemplate;
+    public OrderService(OrderRepository orders, JdbcTemplate jdbc) {
+        this.orders = orders;
+        this.jdbc = jdbc;
     }
 
     public record PlaceOrderResult(OrderEntity order, boolean wasAlreadyPresent) {}
 
     @Transactional
-    public PlaceOrderResult placeOrder(String idempotencyKey, PlaceOrderRequest request) {
-        // 1. Idempotency check FIRST — before any validation or side effects. If this exact
-        //    request (same user + same key) already succeeded, we return that result rather
-        //    than re-validating or re-publishing, which would double-count risk checks and
-        //    could re-emit an event the matching engine has already consumed.
-        var existing = orderRepository.findByUserIdAndIdempotencyKey(request.userId(), idempotencyKey);
+    public PlaceOrderResult placeOrder(UUID userId, String key, PlaceOrderRequest request) {
+        validate(userId, key, request);
+        lockMarket();
+        var existing = orders.findByUserIdAndIdempotencyKey(userId, key);
         if (existing.isPresent()) {
-            log.info("Idempotent replay for user={} key={} -> returning existing order={}",
-                    request.userId(), idempotencyKey, existing.get().getId());
-            return new PlaceOrderResult(existing.get(), true);
+            var order = existing.get();
+            if (!request.market().equals(order.getMarket()) || request.side() != order.getSide()
+                    || request.type() != order.getType() || order.getPrice() == null
+                    || request.price().compareTo(order.getPrice()) != 0
+                    || request.quantity().compareTo(order.getQuantity()) != 0) {
+                throw new OrderValidationException("Idempotency key already used for a different order");
+            }
+            return new PlaceOrderResult(order, true);
         }
 
-        validate(request);
-
-        UUID orderId = UUID.randomUUID();
+        checkRisk(request);
         Instant now = Instant.now();
-        OrderEntity entity = new OrderEntity(
-                orderId, idempotencyKey, request.userId(), request.market(), request.side(),
-                request.type(), request.price(), request.stopPrice(), request.quantity(),
-                OrderStatus.OPEN, now, now
-        );
+        var incoming = orders.saveAndFlush(new OrderEntity(UUID.randomUUID(), key, userId, MARKET,
+                request.side(), request.type(), request.price(), null, request.quantity(), OrderStatus.OPEN, now, now));
+        BigDecimal reservation = reservationFor(incoming, incoming.getQuantity());
+        if (jdbc.update("""
+                UPDATE wallets SET reserved = reserved + ?
+                WHERE user_id = ? AND asset = ? AND balance - reserved >= ?
+                """, reservation, userId, debitAsset(incoming), reservation) != 1) {
+            throw new OrderValidationException("Insufficient available " + debitAsset(incoming));
+        }
+        incoming.setReserved(reservation);
 
-        // Rely on the DB unique constraint (user_id, idempotency_key) as the final safety net
-        // in case two concurrent requests race past the check above.
-        OrderEntity saved = orderRepository.save(entity);
-
-        Order domainOrder = toDomain(saved);
-        OrderCreatedEvent event = OrderCreatedEvent.of(domainOrder);
-
-        // Keyed by market so all orders for BTC-NGN land on the same partition and are
-        // consumed in submission order by a single matching-engine instance for that market —
-        // required for price-time priority to mean anything.
-        kafkaTemplate.send(Topics.ORDERS_CREATED, request.market(), event);
-
-        log.info("Order {} created and published for market {}", orderId, request.market());
-        return new PlaceOrderResult(saved, false);
+        var restingOrders = incoming.getSide() == OrderSide.BUY
+                ? orders.findAsks(incoming.getPrice())
+                : orders.findBids(incoming.getPrice());
+        for (var resting : restingOrders) {
+            BigDecimal remaining = remaining(incoming);
+            if (remaining.signum() == 0) {
+                break;
+            }
+            if (resting.getUserId().equals(userId)) {
+                // Cancel the incoming remainder to preserve priority without self-trading.
+                cancelRemainder(incoming);
+                return new PlaceOrderResult(incoming, false);
+            }
+            execute(incoming, resting, remaining.min(remaining(resting)));
+        }
+        if (incoming.getType() == OrderType.MARKET && remaining(incoming).signum() > 0) {
+            cancelRemainder(incoming);
+        }
+        return new PlaceOrderResult(incoming, false);
     }
 
     @Transactional(readOnly = true)
-    public OrderEntity getOrder(UUID orderId) {
-        return orderRepository.findById(orderId).orElseThrow(() -> new OrderNotFoundException(orderId));
+    public OrderEntity getOrder(UUID userId, UUID orderId) {
+        return orders.findByIdAndUserId(orderId, userId).orElseThrow(() -> new OrderNotFoundException(orderId));
     }
 
     @Transactional
-    public OrderEntity cancelOrder(UUID orderId) {
-        OrderEntity order = getOrder(orderId);
+    public OrderEntity cancelOrder(UUID userId, UUID orderId) {
+        lockMarket();
+        var order = getOrder(userId, orderId);
+        if (order.getStatus() == OrderStatus.OPEN || order.getStatus() == OrderStatus.PARTIALLY_FILLED) {
+            cancelRemainder(order);
+        }
+        return order;
+    }
+
+    private void lockMarket() {
+        jdbc.queryForObject("SELECT market FROM trading_market WHERE market = ? FOR UPDATE", String.class, MARKET);
+    }
+
+    private void checkRisk(PlaceOrderRequest request) {
+        if (request.price().multiply(request.quantity()).compareTo(new BigDecimal("100000000")) > 0) {
+            throw new OrderValidationException("Order notional exceeds 100,000,000 NGN");
+        }
+        boolean blocked = Boolean.TRUE.equals(jdbc.queryForObject("""
+                SELECT halted OR COALESCE(abs(? - last_price) > last_price * 0.10, false)
+                FROM trading_market WHERE market = ?
+                """, Boolean.class, request.price(), MARKET));
+        if (blocked) {
+            throw new OrderValidationException("Market halted or order price exceeds the 10% price band");
+        }
+    }
+
+    private void execute(OrderEntity incoming, OrderEntity resting, BigDecimal quantity) {
+        var buy = incoming.getSide() == OrderSide.BUY ? incoming : resting;
+        var sell = buy == incoming ? resting : incoming;
+        var price = resting.getPrice();
+        var notional = price.multiply(quantity);
+        UUID tradeId = UUID.randomUUID();
+        jdbc.update("INSERT INTO trading_fills VALUES (?, ?, ?, ?, ?, ?)",
+                tradeId, buy.getId(), sell.getId(), price, quantity, Timestamp.from(Instant.now()));
+        debit(buy, quantity, notional);
+        debit(sell, quantity, quantity);
+        credit(buy.getUserId(), BASE, quantity);
+        credit(sell.getUserId(), QUOTE, notional);
+        post(tradeId, BASE, -1, sell.getUserId(), quantity);
+        post(tradeId, BASE, 1, buy.getUserId(), quantity);
+        post(tradeId, QUOTE, -1, buy.getUserId(), notional);
+        post(tradeId, QUOTE, 1, sell.getUserId(), notional);
+        jdbc.update("UPDATE trading_market SET last_price = ? WHERE market = ?", price, MARKET);
+        jdbc.update("INSERT INTO trade_outbox(trade_id) VALUES (?)", tradeId);
+    }
+
+    private void debit(OrderEntity order, BigDecimal quantity, BigDecimal amount) {
+        BigDecimal released = reservationFor(order, quantity);
+        updateDebitWallet(order, amount, released);
+        order.setReserved(order.getReserved().subtract(released));
+        order.applyFill(quantity);
+    }
+
+    private void credit(UUID userId, String asset, BigDecimal amount) {
+        jdbc.update("""
+                INSERT INTO wallets (user_id, asset, balance) VALUES (?, ?, ?)
+                ON CONFLICT (user_id, asset) DO UPDATE SET balance = wallets.balance + EXCLUDED.balance
+                """, userId, asset, amount);
+    }
+
+    private void post(UUID tradeId, String asset, int direction, UUID userId, BigDecimal amount) {
+        jdbc.update("INSERT INTO trading_postings VALUES (?, ?, ?, ?, ?)", tradeId, asset, direction, userId, amount);
+    }
+
+    private void cancelRemainder(OrderEntity order) {
+        updateDebitWallet(order, BigDecimal.ZERO, order.getReserved());
+        order.setReserved(BigDecimal.ZERO);
         order.cancel();
-        OrderEntity saved = orderRepository.save(order);
-
-        kafkaTemplate.send(Topics.ORDERS_CANCELLED, order.getId().toString(),
-                new OrderCancelledEvent(UUID.randomUUID(), orderId, "USER_REQUESTED", Instant.now()));
-
-        return saved;
     }
 
-    private void validate(PlaceOrderRequest request) {
-        if (request.type() == OrderType.LIMIT && request.price() == null) {
-            throw new OrderValidationException("LIMIT orders require a price");
+    private void updateDebitWallet(OrderEntity order, BigDecimal debit, BigDecimal release) {
+        if (jdbc.update("""
+                UPDATE wallets SET balance = balance - ?, reserved = reserved - ?
+                WHERE user_id = ? AND asset = ?
+                """, debit, release, order.getUserId(), debitAsset(order)) != 1) {
+            throw new IllegalStateException("Reserved wallet missing for order " + order.getId());
         }
-        if (request.type() == OrderType.STOP && request.stopPrice() == null) {
-            throw new OrderValidationException("STOP orders require a stopPrice");
-        }
-        if (request.quantity().compareTo(BigDecimal.ZERO) <= 0) {
-            throw new OrderValidationException("quantity must be positive");
-        }
-        // NOTE: balance/risk checks are delegated to risk-service (see risk-service module) —
-        // this method only enforces order-shape invariants that belong to this service.
     }
 
-    private Order toDomain(OrderEntity e) {
-        return new Order(
-                e.getId(), e.getIdempotencyKey(), e.getUserId(), e.getMarket(), e.getSide(), e.getType(),
-                e.getPrice() != null ? Money.of(e.getPrice()) : null,
-                e.getStopPrice() != null ? Money.of(e.getStopPrice()) : null,
-                Money.of(e.getQuantity()), Money.of(e.getFilledQuantity()), e.getStatus(),
-                e.getCreatedAt(), e.getUpdatedAt()
-        );
+    private static BigDecimal remaining(OrderEntity order) {
+        return order.getQuantity().subtract(order.getFilledQuantity());
+    }
+
+    private static BigDecimal reservationFor(OrderEntity order, BigDecimal quantity) {
+        return order.getSide() == OrderSide.BUY ? order.getPrice().multiply(quantity) : quantity;
+    }
+
+    private static String debitAsset(OrderEntity order) {
+        return order.getSide() == OrderSide.BUY ? QUOTE : BASE;
+    }
+
+    private static void validate(UUID userId, String key, PlaceOrderRequest request) {
+        if (request.userId() != null && !userId.equals(request.userId())) {
+            throw new OrderValidationException("Order user must match the authenticated subject");
+        }
+        if (key.isBlank() || key.length() > 128) {
+            throw new OrderValidationException("Idempotency-Key must contain 1 to 128 characters");
+        }
+        if (!MARKET.equals(request.market()) || request.type() == OrderType.STOP
+                || request.stopPrice() != null || request.price() == null) {
+            throw new OrderValidationException("BTC-NGN accepts LIMIT and price-protected MARKET orders");
+        }
     }
 }

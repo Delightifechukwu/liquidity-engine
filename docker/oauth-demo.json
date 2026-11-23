@@ -1,0 +1,11 @@
+{
+  "interactiveLogin": false,
+  "tokenCallbacks": [{
+    "issuerId": "liquidity-engine",
+    "requestMappings": [{
+      "requestParam": "client_id",
+      "match": "*",
+      "claims": {"sub": "${clientId}", "aud": ["liquidity-engine"]}
+    }]
+  }]
+}

@@ -1,6 +1,8 @@
 package com.quidax.liquidityengine.marketdata.ws;
 
 import com.quidax.liquidityengine.marketdata.service.MarketDataBroadcastService;
+import java.io.IOException;
+
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
@@ -22,9 +24,16 @@ public class MarketDataWebSocketHandler extends TextWebSocketHandler {
     }
 
     @Override
-    protected void handleTextMessage(WebSocketSession session, TextMessage message) {
+    protected void handleTextMessage(WebSocketSession session, TextMessage message) throws IOException {
         String market = message.getPayload().trim();
-        broadcastService.subscribe(market, session);
+        if (!"BTC-NGN".equals(market)) {
+            session.close(CloseStatus.POLICY_VIOLATION);
+            return;
+        }
+        synchronized (session) {
+            broadcastService.subscribe(market, session);
+            session.sendMessage(new TextMessage("{\"subscribed\":\"BTC-NGN\"}"));
+        }
     }
 
     @Override

@@ -36,10 +36,10 @@ public class MarketDataBroadcastService {
         subscribersByMarket.values().forEach(sessions -> sessions.remove(session));
     }
 
-    @KafkaListener(topics = Topics.TRADES_EXECUTED, groupId = "market-data-service")
+    @KafkaListener(topics = Topics.TRADES_SETTLED, groupId = "market-data-service")
     public void onTradeExecuted(TradeExecutedEvent event) {
         var trade = event.trade();
-        Tick tick = new Tick(trade.market(), trade.price().value(), trade.quantity().value(), trade.executedAt());
+        Tick tick = new Tick(trade.tradeId(), trade.market(), trade.price().value(), trade.quantity().value(), trade.executedAt());
         broadcast(trade.market(), tick);
     }
 
@@ -51,8 +51,10 @@ public class MarketDataBroadcastService {
             String payload = objectMapper.writeValueAsString(tick);
             TextMessage message = new TextMessage(payload);
             for (WebSocketSession session : sessions) {
-                if (session.isOpen()) {
-                    session.sendMessage(message);
+                synchronized (session) {
+                    if (session.isOpen()) {
+                        session.sendMessage(message);
+                    }
                 }
             }
         } catch (Exception e) {
