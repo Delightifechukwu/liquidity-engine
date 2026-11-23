@@ -23,7 +23,19 @@ To halt order acceptance while investigating, update the market flag through a p
 UPDATE trading_market SET halted = true WHERE market = 'BTC-NGN';
 ```
 
-Existing orders can still be cancelled. After resolving and reconciling the discrepancy, clear the flag to reopen order acceptance.
+Resting internal orders can still be cancelled. Pending external orders retain their reservations until the provider reports a terminal outcome. After resolving and reconciling the discrepancy, clear the flag to reopen order acceptance.
+
+## External execution pending
+
+The buyer and simulated counterparty retain their reservations while the provider outcome is unknown. The relay retries lookup using the persisted engine order ID. If lookup returns HTTP 404, the relay can submit again using that same ID and payload. The provider stores one report per client order ID.
+
+```sh
+docker compose exec -T postgres psql -X -U liquidity -d order_service -c \
+  'SELECT order_id, next_attempt_at FROM external_executions WHERE completed_at IS NULL'
+docker compose logs --tail=150 order-service liquidity-provider-adapter
+```
+
+After pending work drains, run `./scripts/reconcile.sh`. It compares provider execution reports with local order and fill records in addition to checking ledger postings. Pending intents and missing or mismatched reports fail that check.
 
 ## Upgrading the earlier demo
 

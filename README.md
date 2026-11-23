@@ -24,11 +24,19 @@ The order API listens on `127.0.0.1:8081`. The mock identity provider signs toke
 4. **Publish.** The transaction also writes one outbox row per fill. A relay publishes to Kafka using the persisted trade ID and marks the row published after broker acknowledgement. If a crash occurs between those steps, the same trade event can appear again. Kafka delivery has no authority to debit wallets. Market data broadcasts committed trades over WebSocket as a best-effort feed.
 5. **Reconcile.** The SQL reconciliation checks the expected accounts and amounts for each persisted fill, and compares wallet balances and reservations with their opening balances, postings, and open orders.
 
-The market lock gives price-time priority, prevents cancellation from racing a fill, and makes wallet updates straightforward to reason about. It also serializes all orders in the market. The default stack is designed to demonstrate that trade-off and the recovery behavior. It runs the order service, market-data service, and mock liquidity adapter alongside its infrastructure. The earlier in-memory Kafka matcher, async settlement, risk service, and reconciliation job remain available under the Compose `legacy` profile. The audited path uses a separate database-backed book and emits `trades.settled` instead of feeding the older settlement consumer.
+The PostgreSQL market row lock serializes placement, cancellation, and application of provider reports for BTC–NGN. It keeps matching and wallet updates consistent within a transaction. As order traffic increases, requests queue behind that row, so lock wait can become a throughput bottleneck. Provider HTTP calls run outside the transaction.
+
+The default stack runs the order service, market-data service, and simulated liquidity adapter. The earlier in-memory Kafka matcher, asynchronous settlement, risk service, and reconciliation job are available under the Compose `legacy` profile.
 
 ## Liquidity and execution scope
 
-The authenticated `GET /api/v1/routes/buy-preview?maxPrice=50000000&quantity=0.1` endpoint compares an eligible internal price level with a mock provider offer. It checks price, size, expiry, and degraded status. It falls back to internal liquidity when the provider is unavailable. This is an indicative, single-level preview. Set `MOCK_LP_FAILURE_RATE` before starting Compose to inject mock provider errors. Orders execute on the internal book. Provider execution, fees, deposits and withdrawals, and stop triggers are outside the demo’s scope. Stop orders are rejected explicitly.
+The authenticated `GET /api/v1/routes/buy-preview?maxPrice=50000000&quantity=0.1` endpoint compares an eligible internal price level with a mock provider offer. It checks price, size, expiry, and degraded status, and falls back to internal liquidity when the provider is unavailable. The preview is indicative.
+
+Submit a price-protected `MARKET` buy to `POST /api/v1/orders/external` to execute with the simulated provider. Use the same authenticated order payload and `Idempotency-Key` header as for an internal order. The API returns HTTP 202 and reserves the buyer’s NGN and the simulated counterparty’s BTC before submitting. Poll `GET /api/v1/orders/{orderId}` for the terminal state. A partially filled order reports `CANCELLED` with the filled quantity because the remaining quantity is cancelled.
+
+The provider persists its terminal report before responding and delays its initial acknowledgement beyond the relay’s read timeout. The relay looks up the original client order ID before retrying a submission. A fill settles once using the provider’s fill ID, and the terminal report releases unused reservations. While the result is unknown, funds stay reserved and manual cancellation returns HTTP 409. The smoke test verifies timeout recovery, partial and zero-fill outcomes, and reconciliation against the provider’s independently stored reports.
+
+The internal book supports BTC–NGN limit orders and price-protected market orders. External execution uses a single simulated immediate-or-cancel venue. Live provider integration, fees, deposits, withdrawals, and stop triggers are outside the demo’s scope.
 
 ## Run the Java tests
 

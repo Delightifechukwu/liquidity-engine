@@ -270,3 +270,60 @@ case "$ask_status/$race_status/$trade_count" in
 esac
 test "$(sql <<< 'SELECT count(*) FROM trading_discrepancies')" = 0
 echo "PASS: ownership, risk, quote routing and outage fallback, reservations, idempotency, cancellation race, reconciliation, Kafka checkpoint replay, and WebSocket delivery."
+
+external_buyer=$(python3 -c 'import uuid; print(uuid.uuid4())')
+external_token=$(token "$external_buyer")
+sql <<SQL
+BEGIN;
+INSERT INTO wallet_opening_balances VALUES ('$external_buyer','NGN',50000000);
+INSERT INTO wallets (user_id, asset, balance) VALUES ('$external_buyer','NGN',50000000);
+COMMIT;
+SQL
+external_buy='{"market":"BTC-NGN","side":"BUY","type":"MARKET","price":"50000000","quantity":"1"}'
+request 202 POST /external "$external_token" -H 'Idempotency-Key: external-buy' \
+  -H 'Content-Type: application/json' -d "$external_buy"
+external_id=$(field orderId)
+test "$(field status)" = OPEN
+request 409 DELETE "/$external_id" "$external_token"
+request 400 POST '' "$external_token" -H 'Idempotency-Key: external-buy' \
+  -H 'Content-Type: application/json' -d "$external_buy"
+
+external_done() {
+  [[ $(sql <<< "SELECT completed_at IS NOT NULL FROM external_executions WHERE order_id = '$1'") == t ]]
+}
+wait_for external_done "$external_id"
+request 200 POST /external "$external_token" -H 'Idempotency-Key: external-buy' \
+  -H 'Content-Type: application/json' -d "$external_buy"
+test "$(field orderId)" = "$external_id"
+test "$(field status)" = CANCELLED
+test "$(field filledQuantity)" = 0.5
+
+provider_result=$(docker compose exec -T postgres psql -X -v ON_ERROR_STOP=1 -Atq -U liquidity -d liquidity_engine <<SQL
+SELECT fill_id, submissions FROM simulated_provider.provider_executions WHERE client_order_id = '$external_id';
+SQL
+)
+external_trade=${provider_result%|*}
+test -n "$external_trade"
+test "${provider_result##*|}" = 1
+test "$(sql <<< "SELECT count(*) FROM trading_fills WHERE id = '$external_trade' AND buy_order_id = '$external_id'")" = 1
+test "$(sql <<< "SELECT count(*) FROM trading_postings WHERE trade_id = '$external_trade'")" = 4
+test "$(sql <<< "SELECT reserved = 0 AND balance = 25500000 FROM wallets WHERE user_id = '$external_buyer' AND asset = 'NGN'")" = t
+test "$(sql <<< "SELECT balance = 0.5 FROM wallets WHERE user_id = '$external_buyer' AND asset = 'BTC'")" = t
+
+# The default provider delays acknowledgement beyond the relay's timeout.
+docker compose logs --no-color order-service | awk -v id="$external_id" '
+  index($0, id) && /remains pending/ && /timed out/ { timed_out = 1 }
+  END { exit !timed_out }
+'
+
+no_fill='{"market":"BTC-NGN","side":"BUY","type":"MARKET","price":"48000000","quantity":"0.5"}'
+request 202 POST /external "$external_token" -H 'Idempotency-Key: external-no-fill' \
+  -H 'Content-Type: application/json' -d "$no_fill"
+no_fill_id=$(field orderId)
+wait_for external_done "$no_fill_id"
+request 200 GET "/$no_fill_id" "$external_token"
+test "$(field status)" = CANCELLED
+test "$(field filledQuantity)" = 0.0
+test "$(sql <<< "SELECT reserved = 0 AND balance = 25500000 FROM wallets WHERE user_id = '$external_buyer' AND asset = 'NGN'")" = t
+./scripts/reconcile.sh
+echo "PASS: provider timeout, lookup by client order ID, partial settlement, no-fill outcome, and reservation release."

@@ -60,6 +60,7 @@ services:
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/order_service
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      LP_EXECUTION_TOKEN: ${LP_EXECUTION_TOKEN:-local-demo-provider}
       LP_BASE_URL: http://liquidity-provider-adapter:8084
       OAUTH_ISSUER_URI: http://oauth:8080/liquidity-engine
 
@@ -93,7 +94,13 @@ services:
     build:
       context: .
       dockerfile: liquidity-provider-adapter/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/liquidity_engine
+      LP_EXECUTION_TOKEN: ${LP_EXECUTION_TOKEN:-local-demo-provider}
+      LP_ACCEPTANCE_DELAY_MS: ${LP_ACCEPTANCE_DELAY_MS:-2500}
       MOCK_LP_FAILURE_RATE: ${MOCK_LP_FAILURE_RATE:-0}
     ports:
       - "127.0.0.1:${PROVIDER_HOST_PORT:-8084}:8084"

@@ -3,6 +3,7 @@ package com.quidax.liquidityengine.order.service;
 import com.quidax.liquidityengine.common.model.OrderSide;
 import com.quidax.liquidityengine.common.model.OrderStatus;
 import com.quidax.liquidityengine.common.model.OrderType;
+import com.quidax.liquidityengine.common.model.ProviderExecution;
 import com.quidax.liquidityengine.order.controller.PlaceOrderRequest;
 import com.quidax.liquidityengine.order.entity.OrderEntity;
 import com.quidax.liquidityengine.order.repository.OrderRepository;
@@ -17,6 +18,7 @@ import java.util.UUID;
 
 @Service
 public class OrderService {
+    private static final UUID SIMULATED_PROVIDER = UUID.fromString("00000000-0000-0000-0000-000000000001");
     private static final String MARKET = "BTC-NGN";
     private static final String BASE = "BTC";
     private static final String QUOTE = "NGN";
@@ -33,7 +35,22 @@ public class OrderService {
 
     @Transactional
     public PlaceOrderResult placeOrder(UUID userId, String key, PlaceOrderRequest request) {
+        return place(userId, key, request, false);
+    }
+
+    @Transactional
+    public PlaceOrderResult placeExternalOrder(UUID userId, String key, PlaceOrderRequest request) {
+        if (request.side() != OrderSide.BUY || request.type() != OrderType.MARKET) {
+            throw new OrderValidationException("External execution accepts price-protected MARKET buys");
+        }
+        return place(userId, key, request, true);
+    }
+
+    private PlaceOrderResult place(UUID userId, String key, PlaceOrderRequest request, boolean external) {
         validate(userId, key, request);
+        if (SIMULATED_PROVIDER.equals(userId)) {
+            throw new OrderValidationException("Trading is unavailable for this system account");
+        }
         lockMarket();
         var existing = orders.findByUserIdAndIdempotencyKey(userId, key);
         if (existing.isPresent()) {
@@ -41,7 +58,8 @@ public class OrderService {
             if (!request.market().equals(order.getMarket()) || request.side() != order.getSide()
                     || request.type() != order.getType() || order.getPrice() == null
                     || request.price().compareTo(order.getPrice()) != 0
-                    || request.quantity().compareTo(order.getQuantity()) != 0) {
+                    || request.quantity().compareTo(order.getQuantity()) != 0
+                    || external != isExternal(order.getId())) {
                 throw new OrderValidationException("Idempotency key already used for a different order");
             }
             return new PlaceOrderResult(order, true);
@@ -51,14 +69,16 @@ public class OrderService {
         Instant now = Instant.now();
         var incoming = orders.saveAndFlush(new OrderEntity(UUID.randomUUID(), key, userId, MARKET,
                 request.side(), request.type(), request.price(), null, request.quantity(), OrderStatus.OPEN, now, now));
-        BigDecimal reservation = reservationFor(incoming, incoming.getQuantity());
-        if (jdbc.update("""
-                UPDATE wallets SET reserved = reserved + ?
-                WHERE user_id = ? AND asset = ? AND balance - reserved >= ?
-                """, reservation, userId, debitAsset(incoming), reservation) != 1) {
-            throw new OrderValidationException("Insufficient available " + debitAsset(incoming));
+        reserve(incoming);
+        if (external) {
+            var counterparty = orders.saveAndFlush(new OrderEntity(UUID.randomUUID(), incoming.getId().toString(),
+                    SIMULATED_PROVIDER, MARKET, OrderSide.SELL, OrderType.MARKET, request.price(), null,
+                    request.quantity(), OrderStatus.OPEN, now, now));
+            reserve(counterparty);
+            jdbc.update("INSERT INTO external_executions(order_id, counterparty_order_id) VALUES (?, ?)",
+                    incoming.getId(), counterparty.getId());
+            return new PlaceOrderResult(incoming, false);
         }
-        incoming.setReserved(reservation);
 
         var restingOrders = incoming.getSide() == OrderSide.BUY
                 ? orders.findAsks(incoming.getPrice())
@@ -73,7 +93,11 @@ public class OrderService {
                 cancelRemainder(incoming);
                 return new PlaceOrderResult(incoming, false);
             }
-            execute(incoming, resting, remaining.min(remaining(resting)));
+            var buy = incoming.getSide() == OrderSide.BUY ? incoming : resting;
+            var sell = buy == incoming ? resting : incoming;
+            settle(buy, sell, UUID.randomUUID(), resting.getPrice(),
+                    remaining.min(remaining(resting)), Instant.now());
+            jdbc.update("UPDATE trading_market SET last_price = ? WHERE market = ?", resting.getPrice(), MARKET);
         }
         if (incoming.getType() == OrderType.MARKET && remaining(incoming).signum() > 0) {
             cancelRemainder(incoming);
@@ -91,6 +115,10 @@ public class OrderService {
         lockMarket();
         var order = getOrder(userId, orderId);
         if (order.getStatus() == OrderStatus.OPEN || order.getStatus() == OrderStatus.PARTIALLY_FILLED) {
+            if (isExternal(orderId) || SIMULATED_PROVIDER.equals(userId)) {
+                throw new org.springframework.web.server.ResponseStatusException(
+                        org.springframework.http.HttpStatus.CONFLICT, "Awaiting the provider's terminal execution report");
+            }
             cancelRemainder(order);
         }
         return order;
@@ -113,14 +141,63 @@ public class OrderService {
         }
     }
 
-    private void execute(OrderEntity incoming, OrderEntity resting, BigDecimal quantity) {
-        var buy = incoming.getSide() == OrderSide.BUY ? incoming : resting;
-        var sell = buy == incoming ? resting : incoming;
-        var price = resting.getPrice();
+    @Transactional
+    public void applyProviderReport(UUID orderId, ProviderExecution report) {
+        lockMarket();
+        var pending = jdbc.query("""
+                SELECT counterparty_order_id FROM external_executions
+                WHERE order_id = ? AND completed_at IS NULL
+                """, (row, index) -> row.getObject(1, UUID.class), orderId);
+        if (pending.isEmpty()) {
+            return;
+        }
+
+        var buy = orders.findById(orderId).orElseThrow();
+        var sell = orders.findById(pending.getFirst()).orElseThrow();
+        var fill = report.fill();
+        UUID tradeId = null;
+        if (!orderId.equals(report.clientOrderId()) || report.executedAt() == null) {
+            throw new IllegalStateException("Provider report identity or timestamp is invalid");
+        }
+        if (fill != null) {
+            if (fill.id() == null || fill.price() == null || fill.quantity() == null
+                    || fill.price().signum() <= 0 || fill.quantity().signum() <= 0
+                    || fill.price().stripTrailingZeros().scale() > 0 || fill.quantity().stripTrailingZeros().scale() > 8
+                    || fill.price().compareTo(buy.getPrice()) > 0 || fill.quantity().compareTo(buy.getQuantity()) > 0) {
+                throw new IllegalStateException("Provider fill exceeds the protected order or has invalid precision");
+            }
+            tradeId = fill.id();
+            settle(buy, sell, tradeId, fill.price(), fill.quantity(), report.executedAt());
+        }
+        if (remaining(buy).signum() > 0) {
+            cancelRemainder(buy);
+            cancelRemainder(sell);
+        }
+        jdbc.update("UPDATE external_executions SET trade_id = ?, completed_at = clock_timestamp() WHERE order_id = ?",
+                tradeId, orderId);
+    }
+
+    private boolean isExternal(UUID orderId) {
+        return Boolean.TRUE.equals(jdbc.queryForObject(
+                "SELECT EXISTS(SELECT 1 FROM external_executions WHERE order_id = ?)", Boolean.class, orderId));
+    }
+
+    private void reserve(OrderEntity order) {
+        BigDecimal reservation = reservationFor(order, order.getQuantity());
+        if (jdbc.update("""
+                UPDATE wallets SET reserved = reserved + ?
+                WHERE user_id = ? AND asset = ? AND balance - reserved >= ?
+                """, reservation, order.getUserId(), debitAsset(order), reservation) != 1) {
+            throw new OrderValidationException("Insufficient available " + debitAsset(order));
+        }
+        order.setReserved(reservation);
+    }
+
+    private void settle(OrderEntity buy, OrderEntity sell, UUID tradeId, BigDecimal price, BigDecimal quantity,
+                        Instant executedAt) {
         var notional = price.multiply(quantity);
-        UUID tradeId = UUID.randomUUID();
         jdbc.update("INSERT INTO trading_fills VALUES (?, ?, ?, ?, ?, ?)",
-                tradeId, buy.getId(), sell.getId(), price, quantity, Timestamp.from(Instant.now()));
+                tradeId, buy.getId(), sell.getId(), price, quantity, Timestamp.from(executedAt));
         debit(buy, quantity, notional);
         debit(sell, quantity, quantity);
         credit(buy.getUserId(), BASE, quantity);
@@ -129,7 +206,6 @@ public class OrderService {
         post(tradeId, BASE, 1, buy.getUserId(), quantity);
         post(tradeId, QUOTE, -1, buy.getUserId(), notional);
         post(tradeId, QUOTE, 1, sell.getUserId(), notional);
-        jdbc.update("UPDATE trading_market SET last_price = ? WHERE market = ?", price, MARKET);
         jdbc.update("INSERT INTO trade_outbox(trade_id) VALUES (?)", tradeId);
     }
 

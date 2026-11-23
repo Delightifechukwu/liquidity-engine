@@ -2,6 +2,12 @@ server:
   port: 8084
 
 spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/liquidity_engine
+    username: liquidity
+    password: liquidity
+  flyway:
+    default-schema: simulated_provider
   application:
     name: liquidity-provider-adapter
 
@@ -30,3 +36,7 @@ mock-lp:
   failure-rate: 0.3
   min-latency-ms: 50
   max-latency-ms: 400
+
+provider-execution:
+  token: ${LP_EXECUTION_TOKEN:local-demo-provider}
+  acceptance-delay-ms: ${LP_ACCEPTANCE_DELAY_MS:2500}

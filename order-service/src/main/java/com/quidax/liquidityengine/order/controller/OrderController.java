@@ -37,6 +37,15 @@ public class OrderController {
         return ResponseEntity.status(status).body(OrderResponse.from(result.order()));
     }
 
+    @PostMapping("/external")
+    public ResponseEntity<OrderResponse> placeExternalOrder(
+            @RequestHeader("Idempotency-Key") String idempotencyKey,
+            @Valid @RequestBody PlaceOrderRequest request, @AuthenticationPrincipal Jwt jwt) {
+        var result = orderService.placeExternalOrder(userId(jwt), idempotencyKey, request);
+        return ResponseEntity.status(result.wasAlreadyPresent() ? HttpStatus.OK : HttpStatus.ACCEPTED)
+                .body(OrderResponse.from(result.order()));
+    }
+
     @GetMapping("/{orderId}")
     public ResponseEntity<OrderResponse> getOrder(@PathVariable UUID orderId, @AuthenticationPrincipal Jwt jwt) {
         OrderEntity order = orderService.getOrder(userId(jwt), orderId);
